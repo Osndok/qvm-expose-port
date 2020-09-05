@@ -1,8 +1,24 @@
 #!/bin/sh
+#
+# When run in dom0, this script intends to align all the iptable forwarding chains
+# and pinholes between the physical network and that (deep) qube in order to expose
+# that particular port in the given qube as "the real port" which your machine presents
+# to the local area network (LAN).
+#
+# usage: qvm-expose-port $VMNAME $PORT
+#
+# This iteration:
+# https://github.com/Osndok/qvm-expose-port2
+#
+# Previous iterations (oldest first):
+# https://gist.github.com/daktak/f887352d564b54f9e529404cc0eb60d5
+# https://gist.github.com/jpouellet/d8cd0eb8589a5b9bf0c53a28fc530369
+#
+# Alternatives:
+# https://github.com/niccokunzmann/qvm-expose-port
+#
 
-# Inspired by https://gist.github.com/daktak/f887352d564b54f9e529404cc0eb60d5
-
-ip() { qvm-ls --raw-data ip -- "$1"; }
+ip() { qvm-ls --raw-data --fields=ip -- "$1"; }
 netvm() { qvm-prefs -g -- "$1" netvm; }
 
 forward() {
