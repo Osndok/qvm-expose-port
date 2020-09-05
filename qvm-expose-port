@@ -1,11 +1,30 @@
 #!/bin/sh
 #
-# When run in dom0, this script intends to align all the iptable forwarding chains
-# and pinholes between the physical network and that (deep) qube in order to expose
-# that particular port in the given qube as "the real port" which your machine presents
-# to the local area network (LAN).
+# usage: qvm-expose-port [--perm] (vmname|nexthop) port
 #
-# usage: qvm-expose-port $VMNAME $PORT
+# When run in dom0, this script intends to align all the iptable forwarding chains and
+# pinholes for each network qube between the physical network and that (deep) qube in
+# order to expose that particular port in the given qube as "the real port" which your
+# machine presents to the local area network (LAN).
+#
+# UNIMPLEMENTED:
+# When run in a non-dom0 (guest) vm, this script intends to align the iptables only for
+# the next "hop" in the chain.
+#
+# UNIMPLEMENTED:
+# When run in a non-dom0 (guest) vm with the "--perm" flag, this script will *additionally*
+# try to make the settings permanent by mutating the rc.local file in such a way that it
+# will call this script (without the perm flag) on restart, and removing (from the rc.local)
+# any other calls to itself that match the port description.
+#
+# UNIMPLEMENTED:
+# When run from dom0 with the "--perm" flag, this script will try to make the setting permanent
+# by copying itself to the qube, and calling itself therefrom to modify the rc.local file using
+# the procedure mentioned above. The purpose of "copying itself" is so that there is only one
+# script to review & maintain (the one in dom0).
+#
+# It is intended that this script (unless run with the "--perm" flag) will make no lasting changes
+# to either the iptables or filesystem of the guest vms or dom0.
 #
 # This iteration:
 # https://github.com/Osndok/qvm-expose-port2
@@ -20,6 +39,7 @@
 
 ip() { qvm-ls --raw-data --fields=ip -- "$1"; }
 netvm() { qvm-prefs -g -- "$1" netvm; }
+dom0() { test -e /dev/xen/privcmd; }
 
 forward() {
 	local from_domain=$1
