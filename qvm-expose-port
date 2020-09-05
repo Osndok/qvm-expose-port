@@ -7,12 +7,11 @@
 # order to expose that particular port in the given qube as "the real port" which your
 # machine presents to the local area network (LAN).
 #
-# UNIMPLEMENTED:
 # When run in a non-dom0 (guest) vm, this script intends to align the iptables only for
 # the next "hop" in the chain.
 #
 # UNIMPLEMENTED:
-# When run in a non-dom0 (guest) vm with the "--perm" flag, this script will *additionally*
+# When run in a non-dom0 (guest) vm with the "--perm" flag, this script will instead
 # try to make the settings permanent by mutating the rc.local file in such a way that it
 # will call this script (without the perm flag) on restart, and removing (from the rc.local)
 # any other calls to itself that match the port description.
@@ -54,6 +53,8 @@ else
 fi
 
 [ $# -eq 2 ] || usage
+TARGET="$1"
+PORT="$2"
 
 dom0_ip() { qvm-ls --raw-data --fields=ip -- "$1"; }
 dom0_netvm() { qvm-prefs -g -- "$1" netvm; }
@@ -82,6 +83,15 @@ dom0_forward()
 		-p tcp --dport $port -m conntrack --ctstate NEW -j ACCEPT"
 }
 
+qube_forward()
+{
+	ip -4 -o address | tr -s ' /' ' ' | cut -f2,4 -d' ' | while read IFACE IP
+	do
+		iptables -t nat -A PREROUTING -i "$IFACE" -p tcp --dport "$PORT" -d "$IP" -j DNAT --to-destination "$TARGET"
+		iptables -I FORWARD 2 -i "$IFACE" -d "$TARGET" -p tcp --dport "$PORT" -m conntrack --ctstate NEW -j ACCEPT
+	done
+}
+
 dom0_input()
 {
 	local domain=$1
@@ -106,10 +116,28 @@ dom0_recurse_netvms()
 	fi
 }
 
+qube_update_rclocal()
+{
+	local SELF=$(realpath $0)
+}
+
+set -vx
+set -eu
+
 if is_dom0
 then
-	dom0_input "$1" "$2"
-	dom0_recurse_netvms "$1" "$2"
+	if permanent
+	then
+		echo 1>&2 "TODO: recursively copy self to qubes, and call dest script with the 'permanent' flag"
+	else
+		dom0_input "$TARGET" "$PORT"
+		dom0_recurse_netvms "$TARGET" "$PORT"
+	fi
 else
-	echo 1>&2 "executing in qube"
+	if permanent
+	then
+		qube_update_rclocal
+	else
+		qube_forward
+	fi
 fi
