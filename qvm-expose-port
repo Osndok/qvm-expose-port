@@ -24,6 +24,9 @@
 # It is intended that this script (unless run with the "--perm" flag) will make no lasting changes
 # to either the iptables or filesystem of the guest vms or dom0.
 #
+# It is assumed that one would normally "test" a forward operation before making it permanent, so
+# the operations with the "--perm" flag do not actually modify the iptables.
+#
 # This iteration:
 # https://github.com/Osndok/qvm-expose-port2
 #
@@ -34,6 +37,9 @@
 # Alternatives:
 # https://github.com/niccokunzmann/qvm-expose-port
 #
+
+# If a dom0 permanent operation is requested, this is where (on the guest) we should copy ourself.
+QUBE_TARGET_PATH="/usr/local/bin/$(basename $0)"
 
 is_dom0() { test -e /dev/xen/xenbus_backend; }
 
@@ -86,8 +92,11 @@ qube_forward()
 {
 	ip -4 -o address | tr -s ' /' ' ' | cut -f2,4 -d' ' | while read IFACE IP
 	do
-		iptables -t nat -A PREROUTING -i "$IFACE" -p tcp --dport "$PORT" -d "$IP" -j DNAT --to-destination "$TARGET"
-		iptables -I FORWARD 2 -i "$IFACE" -d "$TARGET" -p tcp --dport "$PORT" -m conntrack --ctstate NEW -j ACCEPT
+		if [ "$IFACE" != "lo" ]
+		then
+			iptables -t nat -A PREROUTING -i "$IFACE" -p tcp --dport "$PORT" -d "$IP" -j DNAT --to-destination "$TARGET"
+			iptables -I FORWARD 2 -i "$IFACE" -d "$TARGET" -p tcp --dport "$PORT" -m conntrack --ctstate NEW -j ACCEPT
+		fi
 	done
 }
 
