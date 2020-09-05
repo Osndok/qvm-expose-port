@@ -10,12 +10,11 @@
 # When run in a non-dom0 (guest) vm, this script intends to align the iptables only for
 # the next "hop" in the chain.
 #
-# When run in a non-dom0 (guest) vm with the "--perm" flag, this script will instead
+# When run in a non-dom0 (guest) vm with the "--perm" flag, this script will additionally
 # try to make the settings permanent by mutating the rc.local file in such a way that it
 # will call this script (without the perm flag) on restart, and removing (from the rc.local)
 # any other calls to itself that match the port description.
 #
-# UNIMPLEMENTED:
 # When run from dom0 with the "--perm" flag, this script will try to make the setting permanent
 # by copying itself to the qube, and calling itself therefrom to modify the rc.local file using
 # the procedure mentioned above. The purpose of "copying itself" is so that there is only one
@@ -24,8 +23,8 @@
 # It is intended that this script (unless run with the "--perm" flag) will make no lasting changes
 # to either the iptables or filesystem of the guest vms or dom0.
 #
-# It is assumed that one would normally "test" a forward operation before making it permanent, so
-# the operations with the "--perm" flag do not actually modify the iptables.
+# BUG: the iptable changes are slightly different between the permanent & ephemeral runs.
+# BUG: the non-permanent logic does not work end-to-end (it misses the last hop)
 #
 # This iteration:
 # https://github.com/Osndok/qvm-expose-port2
@@ -40,6 +39,7 @@
 
 # If a dom0 permanent operation is requested, this is where (on the guest) we should copy ourself.
 QUBE_TARGET_PATH="/usr/local/bin/$(basename $0)"
+PERM_ALSO_ADJUSTS_IPTABLES="true"
 
 is_dom0() { test -e /dev/xen/xenbus_backend; }
 
@@ -61,7 +61,7 @@ fi
 TARGET="$1"
 PORT="$2"
 
-dom0_ip() { qvm-ls --raw-data --fields=ip -- "$1"; }
+dom0_ip_of() { qvm-ls --raw-data --fields=ip -- "$1"; }
 dom0_netvm() { qvm-prefs -g -- "$1" netvm; }
 
 dom0_forward()
@@ -70,8 +70,8 @@ dom0_forward()
 	local to_domain=$2
 	local port=$3
 
-	local from_ip=$(dom0_ip "$from_domain")
-	local to_ip=$(dom0_ip "$to_domain")
+	local from_ip=$(dom0_ip_of "$from_domain")
+	local to_ip=$(dom0_ip_of "$to_domain")
 	iface=$(qvm-run -p -u root "$from_domain" "ifconfig \
 		| grep -vE '^(vif|lo)' | grep -oE '^[^: ]+' | head -1")
 
@@ -121,6 +121,8 @@ dom0_recurse_netvms()
 	then
 		dom0_forward "$outer_dom" "$this_dom" "$port"
 		dom0_recurse_netvms "$outer_dom" "$port"
+	else
+		echo 1>&2 "TODO: Need to set the final forwarding from the physical interface's ip"
 	fi
 }
 
@@ -136,14 +138,40 @@ qube_update_rclocal()
 	echo "$SELF $TARGET $PORT" >> $RCLOCAL
 }
 
-set -vx
+dom0_ensconce_one()
+{
+	local outer_dom=$1
+	local inner_dom=$2
+	local inner_ip=$(dom0_ip_of "$inner_dom")
+
+	echo 1>&2 "Making permanent: ${outer_dom}:$PORT -> ${inner_ip}:$PORT (${inner_dom})"
+
+	local SELF=$(realpath $0)
+	cat "$SELF" | qvm-run --user=root --pass-io "$outer_dom" "cat > '$QUBE_TARGET_PATH' ; chmod 755 '$QUBE_TARGET_PATH'"
+	qvm-run --user=root --pass-io "$outer_dom" "'$QUBE_TARGET_PATH' --perm $inner_ip $PORT"
+}
+
+dom0_ensconce_recursively()
+{
+	local this_dom=$1
+
+	local outer_dom=$(dom0_netvm "$this_dom") || true
+
+	if [ -n "$outer_dom" ]
+	then
+		dom0_ensconce_one "$outer_dom" "$this_dom"
+		dom0_ensconce_recursively "$outer_dom"
+	fi
+}
+
+#set -vx
 set -eu
 
 if is_dom0
 then
 	if permanent
 	then
-		echo 1>&2 "TODO: recursively copy self to qubes, and call dest script with the 'permanent' flag"
+		dom0_ensconce_recursively "$TARGET"
 	else
 		dom0_input "$TARGET" "$PORT"
 		dom0_recurse_netvms "$TARGET" "$PORT"
@@ -152,6 +180,11 @@ else
 	if permanent
 	then
 		qube_update_rclocal
+
+		if [ "$PERM_ALSO_ADJUSTS_IPTABLES" == "true" ]
+		then
+			qube_forward
+		fi
 	else
 		qube_forward
 	fi
