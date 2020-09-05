@@ -10,7 +10,6 @@
 # When run in a non-dom0 (guest) vm, this script intends to align the iptables only for
 # the next "hop" in the chain.
 #
-# UNIMPLEMENTED:
 # When run in a non-dom0 (guest) vm with the "--perm" flag, this script will instead
 # try to make the settings permanent by mutating the rc.local file in such a way that it
 # will call this script (without the perm flag) on restart, and removing (from the rc.local)
@@ -118,7 +117,14 @@ dom0_recurse_netvms()
 
 qube_update_rclocal()
 {
+	local DATE=$(date +%F)
 	local SELF=$(realpath $0)
+	local RCLOCAL="/rw/config/rc.local"
+	#RCLOCAL="/tmp/test"
+
+	sed -i.backup -e 's|^\('$SELF' .* '$PORT'\)$|# Removed '$DATE': \1|' "$RCLOCAL"
+
+	echo "$SELF $TARGET $PORT" >> $RCLOCAL
 }
 
 set -vx
