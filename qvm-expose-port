@@ -1,4 +1,7 @@
 #!/bin/sh
+
+# Inspired by https://gist.github.com/daktak/f887352d564b54f9e529404cc0eb60d5
+
 ip() { qvm-ls --raw-data ip -- "$1"; }
 netvm() { qvm-prefs -g -- "$1" netvm; }
 
@@ -6,45 +9,42 @@ forward() {
 	local from_domain=$1
 	local to_domain=$2
 	local port=$3
-	local type=$4
 
 	local from_ip=$(ip "$from_domain")
 	local to_ip=$(ip "$to_domain")
 	iface=$(qvm-run -p -u root "$from_domain" "ifconfig \
-		| grep cast -B 1 --no-group-separator | grep -vE '^(vif|lo)' | grep -oE '^[^: ]+' | head -1")
+		| grep -vE '^(vif|lo)' | grep -oE '^[^: ]+' | head -1")
 
 	[ X"$from_ip" = XNone ] && from_ip=
 
 	echo "$from_domain: forwarding on $iface port $port to $to_domain
 		($from_ip -> $to_ip)" >&2
 	qvm-run -p -u root "$from_domain" \
-		"iptables -t nat -A PREROUTING -i $iface -p $type \
+		"iptables -t nat -A PREROUTING -i $iface -p tcp \
 		--dport $port ${from_ip:+-d} $from_ip \
 		-j DNAT --to-destination $to_ip"
 	qvm-run -p -u root "$from_domain" \
 		"iptables -I FORWARD 2 -i $iface ${to_ip:+-d} $to_ip \
-		-p $type --dport $port -m conntrack --ctstate NEW -j ACCEPT"
+		-p tcp --dport $port -m conntrack --ctstate NEW -j ACCEPT"
 }
 
 input() {
 	local domain=$1
 	local port=$2
-	local type=$3
 
 	echo "$domain: allowing input to port $port" >&2
-	qvm-run -p -u root "$domain" "iptables -I INPUT 5 -p $type \
+	qvm-run -p -u root "$domain" "iptables -I INPUT 5 -p tcp \
 		--dport $port -m conntrack --ctstate NEW -j ACCEPT"
 }
 
 recurse_netvms() {
 	local this_dom=$1
 	local port=$2
-	local type=$3
 
 	local outer_dom=$(netvm "$this_dom")
 	if [ -n "$outer_dom" ]; then
-		forward "$outer_dom" "$this_dom" "$port" "$type"
-		recurse_netvms "$outer_dom" "$port" "$type"
+		forward "$outer_dom" "$this_dom" "$port"
+		recurse_netvms "$outer_dom" "$port"
 	fi
 }
 
@@ -53,10 +53,6 @@ usage() {
 	exit 1
 }
 
-[ $# -eq 2 ] || [ $# -eq 3 ] || usage
-type=$3
-if [ -z ${type} ]; then
-  type=$type
-fi 
-input "$1" "$2" ${type}
-recurse_netvms "$1" "$2" ${type}
+[ $# -eq 2 ] || usage
+input "$1" "$2"
+recurse_netvms "$1" "$2"
