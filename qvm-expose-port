@@ -1,58 +1,79 @@
 #!/bin/sh
-
 # Inspired by https://gist.github.com/daktak/f887352d564b54f9e529404cc0eb60d5
+# Inspired by https://gist.github.com/jpouellet/d8cd0eb8589a5b9bf0c53a28fc530369
 
-ip() { qvm-ls --raw-data ip -- "$1"; }
+ip() { qvm-prefs -g -- "$1" ip; }
 netvm() { qvm-prefs -g -- "$1" netvm; }
 
 forward() {
 	local from_domain=$1
 	local to_domain=$2
 	local port=$3
+	local type=$4
 
 	local from_ip=$(ip "$from_domain")
 	local to_ip=$(ip "$to_domain")
-	iface=$(qvm-run -p -u root "$from_domain" "ifconfig \
-		| grep -vE '^(vif|lo)' | grep -oE '^[^: ]+' | head -1")
+	local iface=$(qvm-run -p -u root "$from_domain" "ifconfig \
+		| grep cast -B 1 --no-group-separator | grep -vE '^(vif|lo)' | grep -oE '^[^: ]+' | head -1")
 
-	[ X"$from_ip" = XNone ] && from_ip=
+	local from_ip=$(qvm-run -p -u root "$from_domain" "hostname -I | cut -d ' ' -f 1")
+	if [ X"$from_ip" = XNone ] ; then local from_ip= ; fi
 
-	echo "$from_domain: forwarding on $iface port $port to $to_domain
-		($from_ip -> $to_ip)" >&2
-	qvm-run -p -u root "$from_domain" \
-		"iptables -t nat -A PREROUTING -i $iface -p tcp \
-		--dport $port ${from_ip:+-d} $from_ip \
-		-j DNAT --to-destination $to_ip"
-	qvm-run -p -u root "$from_domain" \
-		"iptables -I FORWARD 2 -i $iface ${to_ip:+-d} $to_ip \
-		-p tcp --dport $port -m conntrack --ctstate NEW -j ACCEPT"
+	if [[ $3 = "clear" && $4 = "all" ]]
+	then
+		echo "$from_domain: Clearing Port Forwarding from $1 iptables" >&2
+		qvm-run -p -u root "$from_domain" "iptables-save | grep -v 'PortFwd $1' | iptables-restore"
+
+		local nft_cmd="nft list table ip qubes-firewall -a | tr -d '\"' | grep 'iifname $iface accept # handle' | awk '{print \$NF}'"
+		local nft_handle=$(qvm-run -p -u root "$from_domain" "$nft_cmd")
+		if [[ $nft_handle =~ ^[0-9]+$ ]] ; then qvm-run -p -u root "$from_domain" "nft delete rule ip qubes-firewall forward handle $nft_handle" ; fi
+	else
+		echo "$from_domain: Forwarding on $iface port $port to $to_domain
+			($from_ip -> $to_ip)" >&2
+		qvm-run -p -u root "$from_domain" "iptables-save | grep -v 'PortFwd $1>$2:$4$3' | iptables-restore"
+		qvm-run -p -u root "$from_domain" "iptables -t nat -A PREROUTING -i $iface -p $type ${from_ip:+-d} $from_ip --dport $port -j DNAT --to-destination $to_ip \
+			-m comment --comment 'PortFwd $1>$2:$4$3'"
+		qvm-run -p -u root "$from_domain" "iptables -I FORWARD 2 -i $iface -p $type ${to_ip:+-d} $to_ip --dport $port -m conntrack --ctstate NEW -j ACCEPT \
+			-m comment --comment 'PortFwd $1>$2:$4$3'"
+		qvm-run -p -u root "$from_domain" "nft add rule ip qubes-firewall forward meta iifname $iface accept"
+	fi
 }
 
 input() {
 	local domain=$1
 	local port=$2
+	local type=$3
 
-	echo "$domain: allowing input to port $port" >&2
-	qvm-run -p -u root "$domain" "iptables -I INPUT 5 -p tcp \
-		--dport $port -m conntrack --ctstate NEW -j ACCEPT"
+	if [[ $2 = "clear" && $3 = "all" ]]
+	then
+		echo "$domain: Clearing Port Forwarding from $1 iptables" >&2
+		qvm-run -p -u root "$domain" "iptables-save | grep -v 'PortFwd $1' | iptables-restore"
+	else
+		echo "$domain: Allowing input to port $port" >&2
+		qvm-run -p -u root "$domain" "iptables-save | grep -v 'PortFwd $1:$3$2' | iptables-restore"
+	
+		qvm-run -p -u root "$domain" "iptables -I INPUT 5 -p $type --dport $port -m conntrack --ctstate NEW -j ACCEPT \
+			-m comment --comment 'PortFwd $1:$3$2'"
+	fi
 }
 
 recurse_netvms() {
 	local this_dom=$1
 	local port=$2
+	local type=$3
 
 	local outer_dom=$(netvm "$this_dom")
-	if [ -n "$outer_dom" ]; then
-		forward "$outer_dom" "$this_dom" "$port"
-		recurse_netvms "$outer_dom" "$port"
+	if [[ -n "$outer_dom" && "$outer_dom" != "None" ]]; then
+		forward "$outer_dom" "$this_dom" "$port" "$type"
+		recurse_netvms "$outer_dom" "$port" "$type"
 	fi
 }
 
 usage() {
-	echo "Usage: ${0##*/} <vm> <port>" >&2
+	echo "Usage: ${0##*/} <vm> <port> <proto> | <vm> clear all" >&2
 	exit 1
 }
 
-[ $# -eq 2 ] || usage
-input "$1" "$2"
-recurse_netvms "$1" "$2"
+[ $# -eq 3 ] || usage
+input "$1" "$2" "$3"
+recurse_netvms "$1" "$2" "$3"
