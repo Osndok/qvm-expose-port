@@ -1,0 +1,166 @@
+#!/bin/sh
+#
+# usage: qvm-forward-port clientVmName clientport [to] serverVmName serverPort
+#
+# For connecting specific ports between two guest vms.
+#
+# When run in dom0, this script intends to:
+# * Write a qubes-rpc permissions file to allow that forwarding
+# * Copy itself (this script) to the client vm (so only one script to maintain)
+# * Mutate the rc.local file of the client vm to call this script with the same arguments
+# * Call the script in the client vm with the same arguements
+#
+# When run in a non-dom0 (guest) vm, this script intends to:
+# * Perform a safety check that the client name is our hostname
+# * Re-run this script as root using sudo (if run as a lesser user)
+# * Create & activate a temporary systemd service/socket pair directed at the server vm/port
+#
+# When run from dom0, it is assumed that the forwarding should be permanent & always allowed.
+# When run from domN, it is assumed that permission has been granted/persisted in dom0.
+#
+
+QUBE_TARGET_PATH="/usr/local/bin/$(basename $0)"
+
+DOM0_RPC_PREFIX="/etc/qubes-rpc/policy/qubes.ConnectTCP"
+SYSTEMD_DIR="/lib/systemd/system"
+
+is_dom0() { test -e /dev/xen/xenbus_backend; }
+
+usage()
+{
+	echo "Usage: ${0##*/} <client-vm> <port> [to] <server-vm> <server-port>" >&2
+	exit 1
+}
+
+ALL_ARGS="$*"
+
+[ $# -ge 4 ] || usage
+CLIENT_NAME="$1"
+CLIENT_PORT="$2"
+shift 2
+
+if [ "$1" == "to" ]
+then
+	shift
+fi
+
+SERVER_NAME="$1"
+SERVER_PORT="$2"
+shift 2
+
+[ $# -eq 0 ] || usage
+
+SERVICE_NAME="${CLIENT_NAME}${CLIENT_PORT}-${SERVER_NAME}${SERVER_PORT}"
+
+dom0_install_self_and_run()
+{
+	local SELF=$(realpath $0)
+	echo 1>&2 "copy: $SELF -> ${CLIENT_NAME}:${QUBE_TARGET_PATH}"
+	cat "$SELF" | qvm-run --user=root --pass-io "$CLIENT_NAME" "cat > '$QUBE_TARGET_PATH' ; chmod 755 '$QUBE_TARGET_PATH'"
+	qvm-run --user=root --pass-io "$CLIENT_NAME" "'$QUBE_TARGET_PATH' $ALL_ARGS"
+}
+
+dom0_update_client_rclocal()
+{
+	local FILE="/rw/config/rc.local"
+	local UTIME="$(date +%s)"
+	local BACKUP="${FILE}.${UTIME}"
+	local LINE="$QUBE_TARGET_PATH $ALL_ARGS"
+	local MATCH="^${QUBE_TARGET_PATH} [:alnum]+ $CLIENT_PORT"
+
+	if qvm-run --user=root --pass-io "$CLIENT_NAME" "cat ${FILE}" | grep "$MATCH"
+	then
+		echo 1>&2 "${CLIENT_NAME}:${FILE} contains conflicting entries, and removing this is unimplemented"
+		exit 1
+		# Having backups of the file we are mucking with is good...
+		qvm-run --user=root --pass-io "$CLIENT_NAME" "cp -v ${FILE} ${BACKUP}"
+		# TODO: filter rc.local for previous entries
+		# grep -v $MATCH $BACKUP > $FILE ?
+	fi
+
+	qvm-run --user=root --pass-io "$CLIENT_NAME" "echo $LINE >> ${FILE}"
+}
+
+dom0_bless_rpc_permissions()
+{
+	# https://www.qubes-os.org/doc/qrexec/#service-policies-with-arguments
+	local FILE="${DOM0_RPC_PREFIX}+${SERVER_PORT}"
+	local PERM="${CLIENT_NAME} ${SERVER_NAME} allow"
+	echo 1>&2 "append: $FILE"
+	echo "$PERM" >> "$FILE"
+}
+
+qube_verify_client_hostname()
+{
+	local THIS="$(hostname)"
+	if [ "$THIS" != "${CLIENT_NAME}" ]
+	then
+		echo 1>&2 "error: this machine ($THIS) is not $CLIENT_NAME"
+		exit 1
+	fi
+}
+
+must_be_root()
+{
+	if [ "$UID" != 0 ]
+	then
+		# Would be nice if we could use "$@" instead of an unquoted var here, but we have 'shift'd all the args.
+		exec sudo "$0" $ALL_ARGS
+		exit 1
+	fi
+}
+
+qube_write_service()
+{
+	local FILE="${SYSTEMD_DIR}/${SERVICE_NAME}@.service"
+	cat -> "$FILE" <<EOF
+[Unit]
+Description=${SERVICE_NAME}
+
+[Service]
+ExecStart=qrexec-client-vm '${SERVER_NAME}' qubes.ConnectTCP+${SERVER_PORT}
+StandardInput=socket
+StandardOutput=inherit
+EOF
+	echo 1>&2 "wrote: $FILE"
+}
+
+qube_write_socket()
+{
+	local FILE="${SYSTEMD_DIR}/${SERVICE_NAME}.socket"
+	cat -> "$FILE" <<EOF
+[Unit]
+Description=$SERVICE_NAME
+
+[Socket]
+ListenStream=127.0.0.1:$CLIENT_PORT
+Accept=true
+
+[Install]
+WantedBy=sockets.target
+EOF
+	echo 1>&2 "wrote: $FILE"
+}
+
+qube_systemd_reload_and_start()
+{
+	systemctl daemon-reload
+	systemctl start ${SERVICE_NAME}.socket
+}
+
+#set -vx
+set -eu
+
+if is_dom0
+then
+	must_be_root
+	dom0_bless_rpc_permissions
+	dom0_update_client_rclocal
+	dom0_install_self_and_run
+else
+	qube_verify_client_hostname
+	must_be_root
+	qube_write_service
+	qube_write_socket
+	qube_systemd_reload_and_start
+fi
